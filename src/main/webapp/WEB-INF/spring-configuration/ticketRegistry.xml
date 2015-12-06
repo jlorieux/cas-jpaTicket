@@ -23,20 +23,93 @@
        xmlns:p="http://www.springframework.org/schema/p"
        xmlns:c="http://www.springframework.org/schema/c"
        xmlns="http://www.springframework.org/schema/beans"
-       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd">
+       xmlns:util="http://www.springframework.org/schema/util"
+       xmlns:tx="http://www.springframework.org/schema/tx"
+       xmlns:aop="http://www.springframework.org/schema/aop"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd http://www.springframework.org/schema/util http://www.springframework.org/schema/util/spring-util.xsd http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx.xsd http://www.springframework.org/schema/aop http://www.springframework.org/schema/aop/spring-aop.xsd">
     <description>
-        Configuration for the default TicketRegistry which stores the tickets in-memory and cleans them out as specified
+        Configuration for the default TicketRegistry which stores the tickets in database and cleans them out as specified
         intervals.
     </description>
 
+    <bean
+            id="dataSource"
+            class="com.mchange.v2.c3p0.ComboPooledDataSource"
+            p:driverClass="${database.driverClass:org.hsqldb.jdbcDriver}"
+            p:jdbcUrl="${database.url:jdbc:hsqldb:mem:cas-ticket-registry}"
+            p:user="${database.user:sa}"
+            p:password="${database.password:}"
+            p:initialPoolSize="${database.pool.minSize:6}"
+            p:minPoolSize="${database.pool.minSize:6}"
+            p:maxPoolSize="${database.pool.maxSize:18}"
+            p:maxIdleTimeExcessConnections="${database.pool.maxIdleTime:1000}"
+            p:checkoutTimeout="${database.pool.maxWait:2000}"
+            p:acquireIncrement="${database.pool.acquireIncrement:16}"
+            p:acquireRetryAttempts="${database.pool.acquireRetryAttempts:5}"
+            p:acquireRetryDelay="${database.pool.acquireRetryDelay:2000}"
+            p:idleConnectionTestPeriod="${database.pool.idleConnectionTestPeriod:30}"
+            p:preferredTestQuery="${database.pool.connectionHealthQuery:select 1}"
+            />
+
     <!-- Ticket Registry -->
-    <bean id="ticketRegistry" class="org.jasig.cas.ticket.registry.DefaultTicketRegistry"/>
+    <bean id="ticketRegistry" class="org.jasig.cas.ticket.registry.JpaTicketRegistry" />
+
+    <bean class="org.springframework.orm.jpa.support.PersistenceAnnotationBeanPostProcessor"/>
+
+    <util:list id="packagesToScan">
+        <value>org.jasig.cas.ticket</value>
+        <value>org.jasig.cas.adaptors.jdbc</value>
+    </util:list>
+
+    <bean class="org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter"
+          id="jpaVendorAdapter"
+          p:generateDdl="true"
+          p:showSql="true" />
+
+    <bean id="entityManagerFactory"
+          class="org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean"
+          p:dataSource-ref="dataSource"
+          p:jpaVendorAdapter-ref="jpaVendorAdapter"
+          p:packagesToScan-ref="packagesToScan">
+        <property name="jpaProperties">
+            <props>
+                <prop key="hibernate.dialect">${database.dialect:org.hibernate.dialect.HSQLDialect}</prop>
+                <prop key="hibernate.hbm2ddl.auto">create-drop</prop>
+                <prop key="hibernate.jdbc.batch_size">${database.batchSize:1}</prop>
+            </props>
+        </property>
+    </bean>
+
+    <bean id="transactionManager" class="org.springframework.orm.jpa.JpaTransactionManager"
+          p:entityManagerFactory-ref="entityManagerFactory" />
+
+    <tx:advice id="txAdvice" transaction-manager="transactionManager">
+        <tx:attributes>
+            <tx:method name="delete*" read-only="false"/>
+            <tx:method name="save*" read-only="false"/>
+            <tx:method name="update*" read-only="false"/>
+            <tx:method name="get*" read-only="true"/>
+            <tx:method name="*" />
+        </tx:attributes>
+    </tx:advice>
+
+    <aop:config>
+        <aop:pointcut id="ticketRegistryOperations" expression="execution(* org.jasig.cas.ticket.registry.JpaTicketRegistry.*(..))"/>
+        <aop:pointcut id="ticketRegistryLockingOperations" expression="execution(* org.jasig.cas.ticket.registry.support.JpaLockingStrategy.*(..))"/>
+        <aop:advisor advice-ref="txAdvice" pointcut-ref="ticketRegistryOperations"/>
+        <aop:advisor advice-ref="txAdvice" pointcut-ref="ticketRegistryLockingOperations"/>
+    </aop:config>
 
     <!--Quartz -->
     <!-- TICKET REGISTRY CLEANER -->
     <bean id="ticketRegistryCleaner" class="org.jasig.cas.ticket.registry.support.DefaultTicketRegistryCleaner"
           c:centralAuthenticationService-ref="centralAuthenticationService"
-          c:ticketRegistry-ref="ticketRegistry"/>
+          c:ticketRegistry-ref="ticketRegistry"
+          p:lock-ref="cleanerLock"/>
+
+    <bean id="cleanerLock" class="org.jasig.cas.ticket.registry.support.JpaLockingStrategy"
+          p:uniqueId="${host.name}"
+          p:applicationId="cas-ticket-registry-cleaner" />
 
     <bean id="jobDetailTicketRegistryCleaner"
           class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean"
